@@ -22,7 +22,7 @@ import javax.annotation.concurrent.GuardedBy
 
 import scala.collection.mutable.ArrayBuffer
 
-import org.apache.spark.{Logging, MapOutputStatistics, ShuffleDependency, SimpleFutureAction}
+import org.apache.spark._
 import org.apache.spark.rdd.RDD
 import org.apache.spark.sql.catalyst.InternalRow
 import org.apache.spark.sql.execution.{ShuffledRowRDD, SparkPlan}
@@ -81,7 +81,8 @@ import org.apache.spark.sql.execution.{ShuffledRowRDD, SparkPlan}
 private[sql] class ExchangeCoordinator(
     numExchanges: Int,
     advisoryTargetPostShuffleInputSize: Long,
-    minNumPostShufflePartitions: Option[Int] = None)
+    minNumPostShufflePartitions: Option[Int] = None,
+    isSortMergeJoin: Boolean = false)
   extends Logging {
 
   // The registered Exchange operators.
@@ -237,17 +238,50 @@ private[sql] class ExchangeCoordinator(
         } else {
           Some(estimatePartitionStartIndices(mapOutputStatistics))
         }
+      // If we are a doing a sort merge join and one rdd is sufficiently smaller, we can keep the bigger RDD in
+      // place and broadcast the smaller RDD to the bigger RDD
+      val conf = SparkEnv.get.conf
+      val isBroadcastJoinEnabled = conf.getBoolean("spark.shuffle.sort.isBroadcastJoinEnabled", false);
+      if (isBroadcastJoinEnabled && isSortMergeJoin) {
+        val exchange1Size = mapOutputStatistics(0).bytesByPartitionId.sum
+        val exchange2Size = mapOutputStatistics(1).bytesByPartitionId.sum
+        val broadcastThreshold = conf.getInt("spark.shuffle.sort.BroadcastJoinThreshold", 1000000);
+        val exchange1 = exchanges(0)
+        val exchange2 = exchanges(1)
+        val exchange1Length = shuffleDependencies(0).rdd.partitions.length
+        val exchange2Length = shuffleDependencies(1).rdd.partitions.length
+        if (exchange1Size < broadcastThreshold) {
+          val rdd1 = exchange1.preparePostShuffleRDD(shuffleDependencies(0), None, Some(true), Some(exchange2Length))
+          val rdd2 = exchange2.preparePostShuffleRDD(shuffleDependencies(1), None, Some(false), Some(exchange2Length))
+          newPostShuffleRDDs.put(exchange1, rdd1)
+          newPostShuffleRDDs.put(exchange2, rdd2)
+        } else if (exchange2Size < broadcastThreshold) {
+          val rdd1 = exchange1.preparePostShuffleRDD(shuffleDependencies(0), None, Some(false), Some(exchange1Length))
+          val rdd2 = exchange2.preparePostShuffleRDD(shuffleDependencies(1), None, Some(true), Some(exchange1Length))
+          newPostShuffleRDDs.put(exchange1, rdd1)
+          newPostShuffleRDDs.put(exchange2, rdd2)
+        } else {
+          var k = 0
+          while (k < numExchanges) {
+            val exchange = exchanges(k)
+            val rdd =
+              exchange.preparePostShuffleRDD(shuffleDependencies(k), partitionStartIndices)
+            newPostShuffleRDDs.put(exchange, rdd)
 
-      var k = 0
-      while (k < numExchanges) {
-        val exchange = exchanges(k)
-        val rdd =
-          exchange.preparePostShuffleRDD(shuffleDependencies(k), partitionStartIndices)
-        newPostShuffleRDDs.put(exchange, rdd)
+            k += 1
+          }
+        }
+      } else {
+        var k = 0
+        while (k < numExchanges) {
+          val exchange = exchanges(k)
+          val rdd =
+            exchange.preparePostShuffleRDD(shuffleDependencies(k), partitionStartIndices)
+          newPostShuffleRDDs.put(exchange, rdd)
 
-        k += 1
+          k += 1
+        }
       }
-
       // Finally, we set postShuffleRDDs and estimated.
       assert(postShuffleRDDs.isEmpty)
       assert(newPostShuffleRDDs.size() == numExchanges)

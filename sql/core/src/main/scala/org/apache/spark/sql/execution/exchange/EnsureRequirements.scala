@@ -22,6 +22,7 @@ import org.apache.spark.sql.catalyst.expressions._
 import org.apache.spark.sql.catalyst.plans.physical._
 import org.apache.spark.sql.catalyst.rules.Rule
 import org.apache.spark.sql.execution._
+import org.apache.spark.sql.execution.joins.SortMergeJoin
 
 /**
  * Ensures that the [[org.apache.spark.sql.catalyst.plans.physical.Partitioning Partitioning]]
@@ -62,7 +63,8 @@ private[sql] case class EnsureRequirements(sqlContext: SQLContext) extends Rule[
    */
   private def withExchangeCoordinator(
       children: Seq[SparkPlan],
-      requiredChildDistributions: Seq[Distribution]): Seq[SparkPlan] = {
+      requiredChildDistributions: Seq[Distribution],
+      isSortMergeJoin: Boolean): Seq[SparkPlan] = {
     val supportsCoordinator =
       if (children.exists(_.isInstanceOf[ShuffleExchange])) {
         // Right now, ExchangeCoordinator only support HashPartitionings.
@@ -92,7 +94,7 @@ private[sql] case class EnsureRequirements(sqlContext: SQLContext) extends Rule[
           new ExchangeCoordinator(
             children.length,
             targetPostShuffleInputSize,
-            minNumPostShufflePartitions)
+            minNumPostShufflePartitions, isSortMergeJoin)
         children.zip(requiredChildDistributions).map {
           case (e: ShuffleExchange, _) =>
             // This child is an Exchange, we need to add the coordinator.
@@ -230,7 +232,13 @@ private[sql] case class EnsureRequirements(sqlContext: SQLContext) extends Rule[
     // at here for now.
     // Once we finish https://issues.apache.org/jira/browse/SPARK-10665,
     // we can first add Exchanges and then add coordinator once we have a DAG of query fragments.
-    children = withExchangeCoordinator(children, requiredChildDistributions)
+
+    // checking if parent operator is SortMergeJoin as ExchangeCoordinator can make optimizations
+    // in that scenario
+    operator match {
+      case x: SortMergeJoin =>  children = withExchangeCoordinator(children, requiredChildDistributions, true)
+      case _ => children = withExchangeCoordinator(children, requiredChildDistributions, false)
+    }
 
     // Now that we've performed any necessary shuffles, add sorts to guarantee output orderings:
     children = children.zip(requiredChildOrderings).map { case (child, requiredOrdering) =>

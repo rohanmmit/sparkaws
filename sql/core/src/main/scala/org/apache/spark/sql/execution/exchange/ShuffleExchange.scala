@@ -92,7 +92,9 @@ case class ShuffleExchange(
    */
   private[sql] def preparePostShuffleRDD(
       shuffleDependency: ShuffleDependency[Int, InternalRow, InternalRow],
-      specifiedPartitionStartIndices: Option[Array[Int]] = None): ShuffledRowRDD = {
+      specifiedPartitionStartIndices: Option[Array[Int]] = None,
+      isSmallRdd: Option[Boolean] = None,
+      numMapTasks: Option[Int] = None): ShuffledRowRDD = {
     // If an array of partition start indices is provided, we need to use this array
     // to create the ShuffledRowRDD. Also, we need to update newPartitioning to
     // update the number of post-shuffle partitions.
@@ -100,14 +102,14 @@ case class ShuffleExchange(
       assert(newPartitioning.isInstanceOf[HashPartitioning])
       newPartitioning = UnknownPartitioning(indices.length)
     }
-    new ShuffledRowRDD(shuffleDependency, specifiedPartitionStartIndices)
+    new ShuffledRowRDD(shuffleDependency, specifiedPartitionStartIndices, isSmallRdd, numMapTasks)
   }
 
   protected override def doExecute(): RDD[InternalRow] = attachTree(this, "execute") {
     coordinator match {
       case Some(exchangeCoordinator) =>
         val shuffleRDD = exchangeCoordinator.postShuffleRDD(this)
-        assert(shuffleRDD.partitions.length == newPartitioning.numPartitions)
+        //assert(shuffleRDD.partitions.length == newPartitioning.numPartitions)
         shuffleRDD
       case None =>
         val shuffleDependency = prepareShuffleDependency()

@@ -138,6 +138,7 @@ class BlockStoreShuffleReaderSuite extends SparkFunSuite with LocalSparkContext 
       reduceId,
       reduceId + 1,
       TaskContext.empty(),
+      None,
       blockManager,
       mapOutputTracker)
 

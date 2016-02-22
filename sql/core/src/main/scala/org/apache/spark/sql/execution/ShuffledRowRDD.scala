@@ -26,12 +26,15 @@ import org.apache.spark.sql.catalyst.InternalRow
 /**
  * The [[Partition]] used by [[ShuffledRowRDD]]. A post-shuffle partition
  * (identified by `postShufflePartitionIndex`) contains a range of pre-shuffle partitions
- * (`startPreShufflePartitionIndex` to `endPreShufflePartitionIndex - 1`, inclusive).
+ * (`startPreShufflePartitionIndex` to `endPreShufflePartitionIndex - 1`, inclusive) The mapTaskID
+ * is an option that is passed in to restrict the partitions that are requested to a specific master.
+ * See MapOutputTracker for more details on mapTaskId.
  */
 private final class ShuffledRowRDDPartition(
     val postShufflePartitionIndex: Int,
     val startPreShufflePartitionIndex: Int,
-    val endPreShufflePartitionIndex: Int) extends Partition {
+    val endPreShufflePartitionIndex: Int,
+    val mapTaskId: Option[Int] = None) extends Partition {
   override val index: Int = postShufflePartitionIndex
   override def hashCode(): Int = postShufflePartitionIndex
 }
@@ -92,8 +95,9 @@ class CoalescedPartitioner(val parent: Partitioner, val partitionStartIndices: A
  * interfaces / internals.
  *
  * This RDD takes a [[ShuffleDependency]] (`dependency`),
- * and a optional array of partition start indices as input arguments
- * (`specifiedPartitionStartIndices`).
+ * a optional array of partition start indices as input arguments
+ * (`specifiedPartitionStartIndices`), a optional boolean indicating if it is a smallRdd, and
+ * an option indicating the number of map tasks.
  *
  * The `dependency` has the parent RDD of this RDD, which represents the dataset before shuffle
  * (i.e. map output). Elements of this RDD are (partitionId, Row) pairs.
@@ -107,13 +111,20 @@ class CoalescedPartitioner(val parent: Partitioner, val partitionStartIndices: A
  * partition includes `specifiedPartitionStartIndices[i]` to
  * `specifiedPartitionStartIndices[i+1] - 1` (inclusive).
  *
- * When `specifiedPartitionStartIndices` is not defined, there will be
+ * When `specifiedPartitionStartIndices` is not defined and isSmallRdd is not defined, there will be
  * `dependency.partitioner.numPartitions` post-shuffle partitions. For this case,
  * a post-shuffle partition is created for every pre-shuffle partition.
+ *
+ * isSmallRDD and numMaptasks will either be be both defined or both undefined. They will not be defined
+ * if specifiedPartitionStartIndices is defined. If they are defined, we are doing some sort of broadcast join.
+ * isSmallRDD indicates which RDD is small and thus gets broadcasted.
+ * We need to know the numMapTasks as that will equal the number of output partitions.
  */
 class ShuffledRowRDD(
     var dependency: ShuffleDependency[Int, InternalRow, InternalRow],
-    specifiedPartitionStartIndices: Option[Array[Int]] = None)
+    specifiedPartitionStartIndices: Option[Array[Int]] = None,
+    isSmallRDD: Option[Boolean] = None,
+    numMapTasks: Option[Int] = None)
   extends RDD[InternalRow](dependency.rdd.context, Nil) {
 
   private[this] val numPreShufflePartitions = dependency.partitioner.numPartitions
@@ -133,24 +144,36 @@ class ShuffledRowRDD(
 
   override val partitioner: Option[Partitioner] = Some(part)
 
-  override def getPartitions: Array[Partition] = {
-    assert(partitionStartIndices.length == part.numPartitions)
-    Array.tabulate[Partition](partitionStartIndices.length) { i =>
-      val startIndex = partitionStartIndices(i)
-      val endIndex =
-        if (i < partitionStartIndices.length - 1) {
-          partitionStartIndices(i + 1)
+  override def getPartitions: Array[Partition] = isSmallRDD match{
+    case Some(isSmallRDD) =>
+      Array.tabulate[Partition](numMapTasks.get) { i =>
+        if (isSmallRDD) {
+          new ShuffledRowRDDPartition(i,0, numPreShufflePartitions)
         } else {
-          numPreShufflePartitions
+           new ShuffledRowRDDPartition(i,0, numPreShufflePartitions, Some(i))
         }
-      new ShuffledRowRDDPartition(i, startIndex, endIndex)
-    }
+      }
+    case None =>
+      assert(partitionStartIndices.length == part.numPartitions)
+      Array.tabulate[Partition](partitionStartIndices.length) { i =>
+        val startIndex = partitionStartIndices(i)
+        val endIndex =
+          if (i < partitionStartIndices.length - 1) {
+            partitionStartIndices(i + 1)
+          } else {
+            numPreShufflePartitions
+          }
+        new ShuffledRowRDDPartition(i, startIndex, endIndex)
+      }
   }
 
-  override def getPreferredLocations(partition: Partition): Seq[String] = {
-    val tracker = SparkEnv.get.mapOutputTracker.asInstanceOf[MapOutputTrackerMaster]
-    val dep = dependencies.head.asInstanceOf[ShuffleDependency[_, _, _]]
-    tracker.getPreferredLocationsForShuffle(dep, partition.index)
+  override def getPreferredLocations(partition: Partition): Seq[String] = isSmallRDD match{
+    case Some(false) =>
+      val tracker = SparkEnv.get.mapOutputTracker.asInstanceOf[MapOutputTrackerMaster]
+      tracker.getMapOutputLocation(dependency.shuffleId, partition.index).map(_.host).toList
+    case _ =>
+      val tracker = SparkEnv.get.mapOutputTracker.asInstanceOf[MapOutputTrackerMaster]
+      tracker.getPreferredLocationsForShuffle(dependency, partition.index)
   }
 
   override def compute(split: Partition, context: TaskContext): Iterator[InternalRow] = {
@@ -162,7 +185,7 @@ class ShuffledRowRDD(
         dependency.shuffleHandle,
         shuffledRowPartition.startPreShufflePartitionIndex,
         shuffledRowPartition.endPreShufflePartitionIndex,
-        context)
+        context, shuffledRowPartition.mapTaskId)
     reader.read().asInstanceOf[Iterator[Product2[Int, InternalRow]]].map(_._2)
   }
 
