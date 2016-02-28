@@ -93,7 +93,7 @@ private[sql] case class EnsureRequirements(sqlContext: SQLContext) extends Rule[
         val coordinator =
           new ExchangeCoordinator(
             children.length,
-            targetPostShuffleInputSize,
+            targetPostShuffleInputSize, sqlContext,
             minNumPostShufflePartitions, isSortMergeJoin)
         children.zip(requiredChildDistributions).map {
           case (e: ShuffleExchange, _) =>

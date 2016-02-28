@@ -20,6 +20,8 @@ package org.apache.spark.sql.execution.exchange
 import java.util.{HashMap => JHashMap, Map => JMap}
 import javax.annotation.concurrent.GuardedBy
 
+import org.apache.spark.sql.SQLContext
+
 import scala.collection.mutable.ArrayBuffer
 
 import org.apache.spark._
@@ -81,6 +83,7 @@ import org.apache.spark.sql.execution.{ShuffledRowRDD, SparkPlan}
 private[sql] class ExchangeCoordinator(
     numExchanges: Int,
     advisoryTargetPostShuffleInputSize: Long,
+    sqlContext: SQLContext,
     minNumPostShufflePartitions: Option[Int] = None,
     isSortMergeJoin: Boolean = false)
   extends Logging {
@@ -240,12 +243,11 @@ private[sql] class ExchangeCoordinator(
         }
       // If we are a doing a sort merge join and one rdd is sufficiently smaller, we can keep the bigger RDD in
       // place and broadcast the smaller RDD to the bigger RDD
-      val conf = SparkEnv.get.conf
-      val isBroadcastJoinEnabled = conf.getBoolean("spark.shuffle.sort.isBroadcastJoinEnabled", false);
-      if (isBroadcastJoinEnabled && isSortMergeJoin) {
+      val isBroadcastOptimizationEnabled = sqlContext.conf.broadcastOptimizationEnabled
+      if (isBroadcastOptimizationEnabled && isSortMergeJoin) {
         val exchange1Size = mapOutputStatistics(0).bytesByPartitionId.sum
         val exchange2Size = mapOutputStatistics(1).bytesByPartitionId.sum
-        val broadcastThreshold = conf.getInt("spark.shuffle.sort.BroadcastJoinThreshold", 1000000);
+        val broadcastThreshold = sqlContext.conf.broadcastOptimizationThreshold
         val exchange1 = exchanges(0)
         val exchange2 = exchanges(1)
         val exchange1Length = shuffleDependencies(0).rdd.partitions.length
@@ -255,11 +257,13 @@ private[sql] class ExchangeCoordinator(
           val rdd2 = exchange2.preparePostShuffleRDD(shuffleDependencies(1), None, Some(false), Some(exchange2Length))
           newPostShuffleRDDs.put(exchange1, rdd1)
           newPostShuffleRDDs.put(exchange2, rdd2)
+          logInfo("Using Broadcast Optimization to speed up merge join")
         } else if (exchange2Size < broadcastThreshold) {
           val rdd1 = exchange1.preparePostShuffleRDD(shuffleDependencies(0), None, Some(false), Some(exchange1Length))
           val rdd2 = exchange2.preparePostShuffleRDD(shuffleDependencies(1), None, Some(true), Some(exchange1Length))
           newPostShuffleRDDs.put(exchange1, rdd1)
           newPostShuffleRDDs.put(exchange2, rdd2)
+          logInfo("Using Broadcast Optimization to speed up merge join")
         } else {
           var k = 0
           while (k < numExchanges) {

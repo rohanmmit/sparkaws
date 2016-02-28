@@ -264,6 +264,17 @@ private[spark] object SQLConf {
     defaultValue = Some(false),
     doc = "When true, enable adaptive query execution.")
 
+  val BROADCAST_OPTIMIZATION_ENABLED = booleanConf("spark.sql.broadcast.enabled",
+    defaultValue = Some(false),
+    doc = "When true, this enables a broadcast optimization for merge joins. This broadcast optimization" +
+          "is used in cased where one rdd is sufficiently small that it makes sense to send it to all the other" +
+          "the other workers")
+
+  val BROADCAST_OPTIMIZATION_THRESHOLD = intConf("spark.sql.broadcast.threshold",
+    defaultValue = Some(10000000),
+    doc = "When broadcast optimization is enabled and a sort merge join is happenging," +
+      "if one rdd is smaller then this threshold, we will broadcast it to the other threshold ")
+
   val SHUFFLE_MIN_NUM_POSTSHUFFLE_PARTITIONS =
     intConf("spark.sql.adaptive.minNumPostShufflePartitions",
       defaultValue = Some(-1),
@@ -551,6 +562,10 @@ private[sql] class SQLConf extends Serializable with CatalystConf with ParserCon
     getConf(SHUFFLE_TARGET_POSTSHUFFLE_INPUT_SIZE)
 
   private[spark] def adaptiveExecutionEnabled: Boolean = getConf(ADAPTIVE_EXECUTION_ENABLED)
+
+  private[spark] def broadcastOptimizationEnabled: Boolean = getConf(BROADCAST_OPTIMIZATION_ENABLED)
+
+  private[spark] def broadcastOptimizationThreshold: Int = getConf(BROADCAST_OPTIMIZATION_THRESHOLD)
 
   private[spark] def minNumPostShufflePartitions: Int =
     getConf(SHUFFLE_MIN_NUM_POSTSHUFFLE_PARTITIONS)
