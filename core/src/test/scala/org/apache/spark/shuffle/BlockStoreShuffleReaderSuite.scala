@@ -143,6 +143,16 @@ class BlockStoreShuffleReaderSuite extends SparkFunSuite with LocalSparkContext 
       mapOutputTracker)
 
     assert(shuffleReader.read().length === keyValuePairsPerMap * numMaps)
+    val shuffleReaderSingleMap = new BlockStoreShuffleReader(
+      shuffleHandle,
+      reduceId,
+      reduceId + 1,
+      TaskContext.empty(),
+      None,
+      blockManager,
+      mapOutputTracker)
+    assert(shuffleReaderSingleMap.read().length === 1 * numMaps)
+    // test that only fetches keys one from map if mapTaskId is specified
 
     // Calling .length above will have exhausted the iterator; make sure that exhausting the
     // iterator caused retain and release to be called on each buffer.
