@@ -114,10 +114,20 @@ class BlockStoreShuffleReaderSuite extends SparkFunSuite with LocalSparkContext 
     // Make a mocked MapOutputTracker for the shuffle reader to use to determine what
     // shuffle data to read.
     val mapOutputTracker = mock(classOf[MapOutputTracker])
-    when(mapOutputTracker.getMapSizesByExecutorId(shuffleId, reduceId, reduceId + 1)).thenReturn {
+    when(mapOutputTracker.getMapSizesByExecutorId(shuffleId, reduceId, reduceId + 1, None)).thenReturn {
       // Test a scenario where all data is local, to avoid creating a bunch of additional mocks
       // for the code to read data over the network.
       val shuffleBlockIdsAndSizes = (0 until numMaps).map { mapId =>
+        val shuffleBlockId = ShuffleBlockId(shuffleId, mapId, reduceId)
+        (shuffleBlockId, byteOutputStream.size().toLong)
+      }
+      Seq((localBlockManagerId, shuffleBlockIdsAndSizes))
+    }
+
+    when(mapOutputTracker.getMapSizesByExecutorId(shuffleId, reduceId, reduceId + 1, Some(0))).thenReturn {
+      // Test a scenario where all data is local, to avoid creating a bunch of additional mocks
+      // for the code to read data over the network.
+      val shuffleBlockIdsAndSizes = (0 until 1).map { mapId =>
         val shuffleBlockId = ShuffleBlockId(shuffleId, mapId, reduceId)
         (shuffleBlockId, byteOutputStream.size().toLong)
       }
@@ -143,22 +153,32 @@ class BlockStoreShuffleReaderSuite extends SparkFunSuite with LocalSparkContext 
       mapOutputTracker)
 
     assert(shuffleReader.read().length === keyValuePairsPerMap * numMaps)
-    val shuffleReaderSingleMap = new BlockStoreShuffleReader(
-      shuffleHandle,
-      reduceId,
-      reduceId + 1,
-      TaskContext.empty(),
-      None,
-      blockManager,
-      mapOutputTracker)
-    assert(shuffleReaderSingleMap.read().length === 1 * numMaps)
-    // test that only fetches keys one from map if mapTaskId is specified
-
     // Calling .length above will have exhausted the iterator; make sure that exhausting the
     // iterator caused retain and release to be called on each buffer.
     buffers.foreach { buffer =>
       assert(buffer.callsToRetain === 1)
       assert(buffer.callsToRelease === 1)
+    }
+
+    // test that only fetches keys one from map if mapTaskId is specified
+    val mapTaskId = 0
+    val shuffleReaderSingleMap = new BlockStoreShuffleReader(
+      shuffleHandle,
+      reduceId,
+      reduceId + 1,
+      TaskContext.empty(),
+      Some(mapTaskId),
+      blockManager,
+      mapOutputTracker)
+    assert(shuffleReaderSingleMap.read().length === keyValuePairsPerMap)
+    for ((buffer, index) <- buffers.zipWithIndex) {
+      if (index == mapTaskId) {
+        assert(buffer.callsToRetain === 2)
+        assert(buffer.callsToRelease === 2)
+      } else {
+        assert(buffer.callsToRetain === 1)
+        assert(buffer.callsToRelease === 1)
+      }
     }
   }
 }
