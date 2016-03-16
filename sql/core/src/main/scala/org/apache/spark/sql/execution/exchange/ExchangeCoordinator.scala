@@ -248,6 +248,7 @@ private[sql] class ExchangeCoordinator(
     // If we are a doing a sort merge join and one rdd is sufficiently smaller, we can keep the bigger RDD in
     // place and broadcast the smaller RDD to the bigger RDD
     val isBroadcastOptimizationEnabled = sqlContext.conf.broadcastOptimizationEnabled
+     System.out.println("printing if broadcast optimization is enabled" + isBroadcastOptimizationEnabled)
     if (isBroadcastOptimizationEnabled && isSortMergeJoin) {
       val exchange1Size = mapOutputStatistics(0).bytesByPartitionId.sum
       val exchange2Size = mapOutputStatistics(1).bytesByPartitionId.sum
@@ -261,6 +262,7 @@ private[sql] class ExchangeCoordinator(
         val rdd2 = exchange2.preparePostShuffleRDD(shuffleDependencies(1), None, Some(false), Some(exchange2Length))
         newPostShuffleRDDs.put(exchange1, rdd1)
         newPostShuffleRDDs.put(exchange2, rdd2)
+        System.out.println("we are logging exchange 1")
         logInfo("Using Broadcast Optimization to speed up merge join")
       } else if (exchange2Size < broadcastThreshold) {
         val rdd1 = exchange1.preparePostShuffleRDD(shuffleDependencies(0), None, Some(false), Some(exchange1Length))
@@ -268,6 +270,7 @@ private[sql] class ExchangeCoordinator(
         newPostShuffleRDDs.put(exchange1, rdd1)
         newPostShuffleRDDs.put(exchange2, rdd2)
         logInfo("Using Broadcast Optimization to speed up merge join")
+        System.out.println("we are logging exchange 2")
       } else {
         var k = 0
         while (k < numExchanges) {
