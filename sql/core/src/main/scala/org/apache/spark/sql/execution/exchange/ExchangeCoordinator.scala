@@ -204,9 +204,6 @@ private[sql] class ExchangeCoordinator(
     if (!estimated) {
       // Make sure we have the expected number of registered Exchange operators.
       assert(exchanges.length == numExchanges)
-
-      val newPostShuffleRDDs = new JHashMap[ShuffleExchange, ShuffledRowRDD](numExchanges)
-
       // Submit all map stages
       val shuffleDependencies = ArrayBuffer[ShuffleDependency[Int, InternalRow, InternalRow]]()
       val submittedStageFutures = ArrayBuffer[SimpleFutureAction[MapOutputStatistics]]()
@@ -232,49 +229,45 @@ private[sql] class ExchangeCoordinator(
         mapOutputStatistics(j) = submittedStageFutures(j).get()
         j += 1
       }
+      analyzeMapOutputStatistics(mapOutputStatistics, shuffleDependencies)
 
-      // Now, we estimate partitionStartIndices. partitionStartIndices.length will be the
-      // number of post-shuffle partitions.
-      val partitionStartIndices =
-        if (mapOutputStatistics.length == 0) {
-          None
-        } else {
-          Some(estimatePartitionStartIndices(mapOutputStatistics))
-        }
-      // If we are a doing a sort merge join and one rdd is sufficiently smaller, we can keep the bigger RDD in
-      // place and broadcast the smaller RDD to the bigger RDD
-      val isBroadcastOptimizationEnabled = sqlContext.conf.broadcastOptimizationEnabled
-      if (isBroadcastOptimizationEnabled && isSortMergeJoin) {
-        val exchange1Size = mapOutputStatistics(0).bytesByPartitionId.sum
-        val exchange2Size = mapOutputStatistics(1).bytesByPartitionId.sum
-        val broadcastThreshold = sqlContext.conf.broadcastOptimizationThreshold
-        val exchange1 = exchanges(0)
-        val exchange2 = exchanges(1)
-        val exchange1Length = shuffleDependencies(0).rdd.partitions.length
-        val exchange2Length = shuffleDependencies(1).rdd.partitions.length
-        if (exchange1Size < broadcastThreshold) {
-          val rdd1 = exchange1.preparePostShuffleRDD(shuffleDependencies(0), None, Some(true), Some(exchange2Length))
-          val rdd2 = exchange2.preparePostShuffleRDD(shuffleDependencies(1), None, Some(false), Some(exchange2Length))
-          newPostShuffleRDDs.put(exchange1, rdd1)
-          newPostShuffleRDDs.put(exchange2, rdd2)
-          logInfo("Using Broadcast Optimization to speed up merge join")
-        } else if (exchange2Size < broadcastThreshold) {
-          val rdd1 = exchange1.preparePostShuffleRDD(shuffleDependencies(0), None, Some(false), Some(exchange1Length))
-          val rdd2 = exchange2.preparePostShuffleRDD(shuffleDependencies(1), None, Some(true), Some(exchange1Length))
-          newPostShuffleRDDs.put(exchange1, rdd1)
-          newPostShuffleRDDs.put(exchange2, rdd2)
-          logInfo("Using Broadcast Optimization to speed up merge join")
-        } else {
-          var k = 0
-          while (k < numExchanges) {
-            val exchange = exchanges(k)
-            val rdd =
-              exchange.preparePostShuffleRDD(shuffleDependencies(k), partitionStartIndices)
-            newPostShuffleRDDs.put(exchange, rdd)
+    }
+  }
 
-            k += 1
-          }
-        }
+   def analyzeMapOutputStatistics(mapOutputStatistics: Array[MapOutputStatistics],
+                                         shuffleDependencies: ArrayBuffer[ShuffleDependency[Int, InternalRow, InternalRow]]): Unit =  {
+    val newPostShuffleRDDs = new JHashMap[ShuffleExchange, ShuffledRowRDD](numExchanges)
+    // Now, we estimate partitionStartIndices. partitionStartIndices.length will be the
+    // number of post-shuffle partitions.
+    val partitionStartIndices =
+      if (mapOutputStatistics.length == 0) {
+        None
+      } else {
+        Some(estimatePartitionStartIndices(mapOutputStatistics))
+      }
+    // If we are a doing a sort merge join and one rdd is sufficiently smaller, we can keep the bigger RDD in
+    // place and broadcast the smaller RDD to the bigger RDD
+    val isBroadcastOptimizationEnabled = sqlContext.conf.broadcastOptimizationEnabled
+    if (isBroadcastOptimizationEnabled && isSortMergeJoin) {
+      val exchange1Size = mapOutputStatistics(0).bytesByPartitionId.sum
+      val exchange2Size = mapOutputStatistics(1).bytesByPartitionId.sum
+      val broadcastThreshold = sqlContext.conf.broadcastOptimizationThreshold
+      val exchange1 = exchanges(0)
+      val exchange2 = exchanges(1)
+      val exchange1Length = shuffleDependencies(0).rdd.partitions.length
+      val exchange2Length = shuffleDependencies(1).rdd.partitions.length
+      if (exchange1Size < broadcastThreshold) {
+        val rdd1 = exchange1.preparePostShuffleRDD(shuffleDependencies(0), None, Some(true), Some(exchange2Length))
+        val rdd2 = exchange2.preparePostShuffleRDD(shuffleDependencies(1), None, Some(false), Some(exchange2Length))
+        newPostShuffleRDDs.put(exchange1, rdd1)
+        newPostShuffleRDDs.put(exchange2, rdd2)
+        logInfo("Using Broadcast Optimization to speed up merge join")
+      } else if (exchange2Size < broadcastThreshold) {
+        val rdd1 = exchange1.preparePostShuffleRDD(shuffleDependencies(0), None, Some(false), Some(exchange1Length))
+        val rdd2 = exchange2.preparePostShuffleRDD(shuffleDependencies(1), None, Some(true), Some(exchange1Length))
+        newPostShuffleRDDs.put(exchange1, rdd1)
+        newPostShuffleRDDs.put(exchange2, rdd2)
+        logInfo("Using Broadcast Optimization to speed up merge join")
       } else {
         var k = 0
         while (k < numExchanges) {
@@ -286,12 +279,22 @@ private[sql] class ExchangeCoordinator(
           k += 1
         }
       }
-      // Finally, we set postShuffleRDDs and estimated.
-      assert(postShuffleRDDs.isEmpty)
-      assert(newPostShuffleRDDs.size() == numExchanges)
-      postShuffleRDDs.putAll(newPostShuffleRDDs)
-      estimated = true
+    } else {
+      var k = 0
+      while (k < numExchanges) {
+        val exchange = exchanges(k)
+        val rdd =
+          exchange.preparePostShuffleRDD(shuffleDependencies(k), partitionStartIndices)
+        newPostShuffleRDDs.put(exchange, rdd)
+
+        k += 1
+      }
     }
+    // Finally, we set postShuffleRDDs and estimated.
+    assert(postShuffleRDDs.isEmpty)
+    assert(newPostShuffleRDDs.size() == numExchanges)
+    postShuffleRDDs.putAll(newPostShuffleRDDs)
+    estimated = true
   }
 
   def postShuffleRDD(exchange: ShuffleExchange): ShuffledRowRDD = {

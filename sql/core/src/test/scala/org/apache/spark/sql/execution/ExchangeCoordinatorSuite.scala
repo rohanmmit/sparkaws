@@ -17,13 +17,20 @@
 
 package org.apache.spark.sql.execution
 
+
+import org.apache.spark.rdd.{RDD, ShuffledRDD}
+import org.apache.spark.sql.catalyst.InternalRow
+import org.apache.spark.sql.catalyst.expressions.Literal
+import org.apache.spark.sql.catalyst.plans.physical.HashPartitioning
 import org.scalatest.BeforeAndAfterAll
 
-import org.apache.spark.{MapOutputStatistics, SparkConf, SparkContext, SparkFunSuite}
+import org.apache.spark._
 import org.apache.spark.sql._
 import org.apache.spark.sql.execution.exchange.{ExchangeCoordinator, ShuffleExchange}
 import org.apache.spark.sql.functions._
 import org.apache.spark.sql.test.TestSQLContext
+
+import scala.collection.mutable.ArrayBuffer
 
 class ExchangeCoordinatorSuite extends SparkFunSuite with BeforeAndAfterAll {
 
@@ -56,6 +63,8 @@ class ExchangeCoordinatorSuite extends SparkFunSuite with BeforeAndAfterAll {
       coordinator.estimatePartitionStartIndices(mapOutputStatistics)
     assert(estimatedPartitionStartIndices === expectedPartitionStartIndices)
   }
+
+
 
   test("test estimatePartitionStartIndices - 1 Exchange") {
     val test = { sqlContext: SQLContext =>
@@ -181,6 +190,7 @@ class ExchangeCoordinatorSuite extends SparkFunSuite with BeforeAndAfterAll {
         // There are a few large pre-shuffle partitions.
         val bytesByPartitionId1 = Array[Long](0, 100, 40, 30, 0)
         val bytesByPartitionId2 = Array[Long](30, 0, 60, 0, 110)
+
         val expectedPartitionStartIndices = Array[Int](0, 2, 3)
         checkEstimation(
           coordinator,
@@ -242,6 +252,116 @@ class ExchangeCoordinatorSuite extends SparkFunSuite with BeforeAndAfterAll {
     }
     withSQLContextBasic(test)
   }
+  private def checkEstimationForBroadcast(coordinator: ExchangeCoordinator,
+                                          bytesByPartitionIdArray: Array[Array[Long]],
+                                          shuffleDependency1: ShuffleDependency[Int, InternalRow, InternalRow],
+                                          shuffleDependency2: ShuffleDependency[Int, InternalRow, InternalRow],
+                                          expectedPostRDDS: Map[ShuffleExchange, ShuffledRowRDD]): Unit = {
+    val mapOutputStatistics = bytesByPartitionIdArray.zipWithIndex.map {
+      case (bytesByPartitionId, index) =>
+        new MapOutputStatistics(index, bytesByPartitionId)
+    }
+    for ((shuffleExchange,expectedShuffleRowRDD) <- expectedPostRDDS) {
+      coordinator.registerExchange(shuffleExchange)
+    }
+    val shuffleDependencies = ArrayBuffer[ShuffleDependency[Int, InternalRow, InternalRow]]()
+    shuffleDependencies += shuffleDependency1
+    shuffleDependencies += shuffleDependency2
+    coordinator.analyzeMapOutputStatistics(mapOutputStatistics, shuffleDependencies)
+    val hey = "Ads"
+    for ((shuffleExchange,expectedShuffleRowRDD) <- expectedPostRDDS) {
+      val shuffledRowRDD = coordinator.postShuffleRDD(shuffleExchange)
+      assert(shuffledRowRDD.getNumPartitions == expectedShuffleRowRDD.getNumPartitions)
+      val expectedPartitions = expectedShuffleRowRDD.getPartitions
+      val actualPartitions = shuffledRowRDD.getPartitions
+      for ((expectedPartition, actualPartition) <- expectedPartitions zip actualPartitions) {
+        val expectedShuffledPartition = expectedPartition.asInstanceOf[ShuffledRowRDDPartition]
+        val actualShuffledPartition = actualPartition.asInstanceOf[ShuffledRowRDDPartition]
+        assert(expectedShuffledPartition.postShufflePartitionIndex == actualShuffledPartition.postShufflePartitionIndex)
+        assert(expectedShuffledPartition.mapTaskId == actualShuffledPartition.mapTaskId)
+        assert(expectedShuffledPartition.startPreShufflePartitionIndex == actualShuffledPartition.startPreShufflePartitionIndex)
+        assert(expectedShuffledPartition.endPreShufflePartitionIndex == actualShuffledPartition.endPreShufflePartitionIndex)
+      }
+      assert(shuffledRowRDD.collect().deep == expectedShuffleRowRDD.collect().deep)
+    }
+  }
+
+  test("test broadcast optimization stuff") {
+    val finalPartitioning = HashPartitioning(Literal(1) :: Nil, 8)
+    val plan1 = DummySparkPlan(outputPartitioning =  finalPartitioning)
+    val plan2 =  DummySparkPlan()
+    val test = { sqlContext: SQLContext =>
+      val partitioning = HashPartitioning(Literal(1) :: Nil, 5)
+      val row1 = InternalRow(Row("Row1", 555))
+      val row2 = InternalRow(Row("Row2", 666))
+      val rowsRDD1 = sqlContext.sparkContext.parallelize(Seq((0, row1), (1, row1), (2,row1),(3,row1),(4,row1),(5,row1),
+          (6,row1)),6)
+        .asInstanceOf[RDD[Product2[Int, InternalRow]]]
+      val shuffleDependency1 =
+        new ShuffleDependency[Int, InternalRow, InternalRow](
+          rowsRDD1, new HashPartitioner(5))
+      val rowsRDD2 = sqlContext.sparkContext.parallelize(Seq((0, row2), (1, row2), (2,row2),(3,row2)), 4)
+        .asInstanceOf[RDD[Product2[Int, InternalRow]]]
+      val shuffleDependency2 =
+        new ShuffleDependency[Int, InternalRow, InternalRow](
+          rowsRDD2, new HashPartitioner(5))
+
+      {
+        // testing that exchange1 is broadcast
+        val bytesByPartitionId1 = Array[Long](10, 10, 10, 10, 10)
+        val bytesByPartitionId2 = Array[Long](40, 10, 0, 10, 30)
+        val shuffledRowRdd1 = new ShuffledRowRDD(shuffleDependency1, None,Some(true), Some(4))
+        val shuffledRowRdd2 = new ShuffledRowRDD(shuffleDependency2, None,Some(false), Some(4))
+        val coordinator = new ExchangeCoordinator(2, 100L, sqlContext, None, true)
+        val shuffleExchange1 =  ShuffleExchange(partitioning,plan1, Some(coordinator));
+        val shuffleExchange2 =  ShuffleExchange(partitioning,plan2, Some(coordinator));
+        val postShuffledRdds = Map[ShuffleExchange, ShuffledRowRDD](shuffleExchange1 -> shuffledRowRdd1,
+            shuffleExchange2 -> shuffledRowRdd2)
+        checkEstimationForBroadcast(coordinator,
+          Array(bytesByPartitionId1, bytesByPartitionId2),
+          shuffleDependency1,
+          shuffleDependency2,
+          postShuffledRdds)
+      }
+      {
+        // testing that exchange2 is broadcast
+        val bytesByPartitionId1 = Array[Long](40, 40, 0, 10, 30)
+        val bytesByPartitionId2 = Array[Long](10, 10, 10, 10, 10)
+        val shuffledRowRdd1 = new ShuffledRowRDD(shuffleDependency1, None,Some(false), Some(6))
+        val shuffledRowRdd2 = new ShuffledRowRDD(shuffleDependency2, None,Some(true), Some(6))
+        val coordinator = new ExchangeCoordinator(2, 100L, sqlContext, None, true)
+        val shuffleExchange1 =  ShuffleExchange(partitioning,plan1, Some(coordinator));
+        val shuffleExchange2 =  ShuffleExchange(partitioning,plan2, Some(coordinator));
+        val postShuffledRdds = Map[ShuffleExchange, ShuffledRowRDD](shuffleExchange1 -> shuffledRowRdd1,
+              shuffleExchange2 -> shuffledRowRdd2)
+        checkEstimationForBroadcast(coordinator,
+          Array(bytesByPartitionId1, bytesByPartitionId2),
+          shuffleDependency1,
+          shuffleDependency2,
+          postShuffledRdds)
+      }
+      {
+      // testing that no exchange is broadcast
+        val bytesByPartitionId1 = Array[Long](100, 100, 40, 30, 0)
+        val bytesByPartitionId2 = Array[Long](30, 0, 60, 70, 110)
+        val expectedPartitionStartIndices = Array[Int](0, 1, 2, 3, 4)
+        val shuffledRowRdd1 = new ShuffledRowRDD(shuffleDependency1, Some(expectedPartitionStartIndices))
+        val shuffledRowRdd2 = new ShuffledRowRDD(shuffleDependency2, Some(expectedPartitionStartIndices))
+        val coordinator = new ExchangeCoordinator(2, 100L, sqlContext, None, true)
+        val shuffleExchange1 =  ShuffleExchange(partitioning,plan1, Some(coordinator));
+        val shuffleExchange2 =  ShuffleExchange(partitioning,plan2, Some(coordinator));
+        val postShuffledRdds = Map[ShuffleExchange, ShuffledRowRDD](shuffleExchange1 -> shuffledRowRdd1,
+              shuffleExchange2 -> shuffledRowRdd2)
+        checkEstimationForBroadcast(coordinator,
+          Array(bytesByPartitionId1, bytesByPartitionId2),
+          shuffleDependency1,
+          shuffleDependency2,
+          postShuffledRdds)
+      }
+
+    }
+    withSQLContextJoinOptimization(test, true, 100)
+  }
 
   ///////////////////////////////////////////////////////////////////////////
   // Query tests
@@ -292,6 +412,20 @@ class ExchangeCoordinatorSuite extends SparkFunSuite with BeforeAndAfterAll {
     try f(sqlContext) finally sparkContext.stop()
   }
 
+  // sql context for broadcast optimization in sort merge join
+  def withSQLContextJoinOptimization(
+                      f: SQLContext => Unit,
+                      broadcastJoinEnabled: Boolean,
+                      threshold: Int): Unit = {
+    val sparkConf = getSparkConf()
+      .set(SQLConf.SHUFFLE_PARTITIONS.key, "5")
+      .set(SQLConf.ADAPTIVE_EXECUTION_ENABLED.key, "true")
+      .set(SQLConf.BROADCAST_OPTIMIZATION_ENABLED.key, broadcastJoinEnabled.toString)
+      .set(SQLConf.BROADCAST_OPTIMIZATION_THRESHOLD.key,threshold.toString)
+    val sparkContext = new SparkContext(sparkConf)
+    val sqlContext = new TestSQLContext(sparkContext)
+    try f(sqlContext) finally sparkContext.stop()
+  }
   Seq(Some(3), None).foreach { minNumPostShufflePartitions =>
     val testNameNote = minNumPostShufflePartitions match {
       case Some(numPartitions) => "(minNumPostShufflePartitions: 3)"
