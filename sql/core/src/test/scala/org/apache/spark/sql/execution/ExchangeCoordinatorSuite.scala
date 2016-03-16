@@ -268,7 +268,6 @@ class ExchangeCoordinatorSuite extends SparkFunSuite with BeforeAndAfterAll {
     shuffleDependencies += shuffleDependency1
     shuffleDependencies += shuffleDependency2
     coordinator.analyzeMapOutputStatistics(mapOutputStatistics, shuffleDependencies)
-    val hey = "Ads"
     for ((shuffleExchange,expectedShuffleRowRDD) <- expectedPostRDDS) {
       val shuffledRowRDD = coordinator.postShuffleRDD(shuffleExchange)
       assert(shuffledRowRDD.getNumPartitions == expectedShuffleRowRDD.getNumPartitions)
