@@ -172,8 +172,7 @@ class ShuffledRowRDD(
       val tracker = SparkEnv.get.mapOutputTracker.asInstanceOf[MapOutputTrackerMaster]
       tracker.getMapOutputLocation(dependency.shuffleId, partition.index).map(_.host).toList
     case _ =>
-      val tracker = SparkEnv.get.mapOutputTracker.asInstanceOf[MapOutputTrackerMaster]
-      tracker.getPreferredLocationsForShuffle(dependency, partition.index)
+      Nil
   }
 
   override def compute(split: Partition, context: TaskContext): Iterator[InternalRow] = {
