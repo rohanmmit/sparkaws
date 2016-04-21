@@ -141,8 +141,7 @@ class ShuffledRowRDD(
     new CoalescedPartitioner(dependency.partitioner, partitionStartIndices)
 
   override def getDependencies: Seq[Dependency[_]] = List(dependency)
-
-  override val partitioner: Option[Partitioner] = Some(part)
+  
 
   override def getPartitions: Array[Partition] = isSmallRDD match{
     case Some(isSmallRDD) =>
