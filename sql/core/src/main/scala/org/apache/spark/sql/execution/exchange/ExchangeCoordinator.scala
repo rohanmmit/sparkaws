@@ -252,6 +252,12 @@ private[sql] class ExchangeCoordinator(
     if (isBroadcastOptimizationEnabled && isSortMergeJoin) {
       val exchange1Size = mapOutputStatistics(0).bytesByPartitionId.sum
       val exchange2Size = mapOutputStatistics(1).bytesByPartitionId.sum
+      System.out.println("the size of exchange 1 is " + exchange1Size)
+      System.out.println("the size of exchange 2 is" + exchange2Size)
+      val exchange1Output = mapOutputStatistics(0).bytesByPartitionId
+      val exchange2Output = mapOutputStatistics(1).bytesByPartitionId
+      System.out.println("the exchange 1 output" + exchange1Output.deep)
+      System.out.println("the exchange 2 output is" + exchange2Output.deep)
       val broadcastThreshold = sqlContext.conf.broadcastOptimizationThreshold
       val exchange1 = exchanges(0)
       val exchange2 = exchanges(1)

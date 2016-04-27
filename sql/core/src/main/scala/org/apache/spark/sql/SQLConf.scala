@@ -270,7 +270,7 @@ private[spark] object SQLConf {
           "is used in cased where one rdd is sufficiently small that it makes sense to send it to all the other" +
           "the other workers")
 
-  val BROADCAST_OPTIMIZATION_THRESHOLD = intConf("spark.sql.broadcast.threshold",
+  val BROADCAST_OPTIMIZATION_THRESHOLD = longConf("spark.sql.broadcast.threshold",
     defaultValue = Some(10000000),
     doc = "When broadcast optimization is enabled and a sort merge join is happenging," +
       "if one rdd is smaller then this threshold, we will broadcast it to the other threshold ")
@@ -565,7 +565,7 @@ private[sql] class SQLConf extends Serializable with CatalystConf with ParserCon
 
   private[spark] def broadcastOptimizationEnabled: Boolean = getConf(BROADCAST_OPTIMIZATION_ENABLED)
 
-  private[spark] def broadcastOptimizationThreshold: Int = getConf(BROADCAST_OPTIMIZATION_THRESHOLD)
+  private[spark] def broadcastOptimizationThreshold: Long = getConf(BROADCAST_OPTIMIZATION_THRESHOLD)
 
   private[spark] def minNumPostShufflePartitions: Int =
     getConf(SHUFFLE_MIN_NUM_POSTSHUFFLE_PARTITIONS)
